@@ -1,148 +1,125 @@
-import itertools
-import matplotlib
-import numpy as np
 import sys
-
-
-def make_epsilon_greedy_policy(estimator, epsilon, nA):
-    """
-    Creates an epsilon-greedy policy based on a given Q-function approximator and epsilon.
-    
-    Args:
-        estimator: An estimator that returns q values for a given state
-        epsilon: The probability to select a random action . float between 0 and 1.
-        nA: Number of actions in the environment.
-    
-    Returns:
-        A function that takes the observation as an argument and returns
-        the probabilities for each action in the form of a numpy array of length nA.
-    
-    """
-    def policy_fn(observation):
-        A = np.ones(nA, dtype=float) * epsilon / nA
-        q_values = estimator.predict(observation)
-        best_action = np.argmax(q_values)
-        A[best_action] += (1.0 - epsilon)
-        return A
-    return policy_fn
-
-class Estimator():
-    """
-    Value Function approximator. 
-    """
-    
-    def __init__(self):
-        # We create a separate model for each action in the environment's
-        # action space. Alternatively we could somehow encode the action
-        # into the features, but this way it's easier to code up.
-        self.models = []
-        for _ in range(env.action_space.n):
-            model = SGDRegressor(learning_rate="constant")
-            # We need to call partial_fit once to initialize the model
-            # or we get a NotFittedError when trying to make a prediction
-            # This is quite hacky.
-            model.partial_fit([self.featurize_state(env.reset())], [0])
-            self.models.append(model)
-    
-    def featurize_state(self, state):
-        """
-        Returns the featurized representation for a state.
-        """
-        scaled = scaler.transform([state])
-        featurized = featurizer.transform(scaled)
-        return featurized[0]
-    
-    def predict(self, s, a=None):
-        """
-        Makes value function predictions.
-        
-        Args:
-            s: state to make a prediction for
-            a: (Optional) action to make a prediction for
-            
-        Returns
-            If an action a is given this returns a single number as the prediction.
-            If no action is given this returns a vector or predictions for all actions
-            in the environment where pred[i] is the prediction for action i.
-            
-        """
-        features = self.featurize_state(s)
-        if not a:
-            return np.array([m.predict([features])[0] for m in self.models])
-        else:
-            return self.models[a].predict([features])[0]
-    
-    def update(self, s, a, y):
-        """
-        Updates the estimator parameters for a given state and action towards
-        the target y.
-        """
-        features = self.featurize_state(s)
-        self.models[a].partial_fit([features], [y])
+import argparse
+import numpy as np
+import gym
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.autograd import Variable
+from collections import deque
+from collections import namedtuple
 
 
 
-def q_learning(env, estimator, num_episodes, discount_factor=1.0, epsilon=0.1, epsilon_decay=1.0):
-    """
-    Q-Learning algorithm for fff-policy TD control using Function Approximation.
-    Finds the optimal greedy policy while following an epsilon-greedy policy.
-    
-    Args:
-        env: OpenAI environment.
-        estimator: Action-Value function estimator
-        num_episodes: Number of episodes to run for.
-        discount_factor: Gamma discount factor.
-        epsilon: Chance the sample a random action. Float betwen 0 and 1.
-        epsilon_decay: Each episode, epsilon is decayed by this factor
-    
-    Returns:
-        An EpisodeStats object with two numpy arrays for episode_lengths and episode_rewards.
-    """
+def tt(ndarray):
+    return Variable(torch.from_numpy(ndarray).float().cuda(), requires_grad=False)
 
-    for i_episode in range(num_episodes):
-        
-        # The policy we're following
-        policy = make_epsilon_greedy_policy(
-            estimator, epsilon * epsilon_decay**i_episode, env.action_space.n)
-        
-        # Reset the environment and pick the first action
-        state = env.reset()
-        
-        # Only used for SARSA, not Q-Learning
-        next_action = None
-        
-        # One step in the environment
-        for t in itertools.count():
-                        
-            # Choose an action to take
-            # If we're using SARSA we already decided in the previous step
-            if next_action is None:
-                action_probs = policy(state)
-                action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-            else:
-                action = next_action
-            
-            # Take a step
-            next_state, reward, done, _ = env.step(action)
 
-            # TD Update
-            q_values_next = estimator.predict(next_state)
-            
-            # Use this code for Q-Learning
-            # Q-Value TD Target
-            td_target = reward + discount_factor * np.max(q_values_next)
-            
-            # Use this code for SARSA TD Target for on policy-training:
-            # next_action_probs = policy(next_state)
-            # next_action = np.random.choice(np.arange(len(next_action_probs)), p=next_action_probs)             
-            # td_target = reward + discount_factor * q_values_next[next_action]
-            
-            # Update the function approximator using our target
-            estimator.update(state, action, td_target)
-        
-                
-            if done:
-                break
-                
-            state = next_state
-    
+def soft_update(target, source, tau):
+    for target_param, param in zip(target.parameters(), source.parameters()):
+        target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
+
+
+def hard_update(target, source):
+    soft_update(target, source, 1.0)
+
+
+class Q(nn.Module):
+    def __init__(self, state_dim, action_dim, non_linearity=F.relu, hidden_dim=50):
+        super(Q, self).__init__()
+        self.fc1 = nn.Linear(state_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, action_dim)
+        self._non_linearity = non_linearity
+
+    def forward(self, x):
+        x = self._non_linearity(self.fc1(x))
+        x = self._non_linearity(self.fc2(x))
+        return self.fc3(x)
+
+
+class ReplayBuffer:
+    # Replay buffer for experience replay. Stores transitions.
+    def __init__(self, max_size):
+        self._data = namedtuple("ReplayBuffer", ["states", "actions", "next_states", "rewards", "terminal_flags"])
+        self._data = self._data(states=[], actions=[], next_states=[], rewards=[], terminal_flags=[])
+        self._size = 0
+        self._max_size = max_size
+
+    def add_transition(self, state, action, next_state, reward, done):
+        self._data.states.append(state)
+        self._data.actions.append(action)
+        self._data.next_states.append(next_state)
+        self._data.rewards.append(reward)
+        self._data.terminal_flags.append(done)
+        self._size += 1
+
+        if self._size > self._max_size:
+            self._data.states.pop(0)
+            self._data.actions.pop(0)
+            self._data.next_states.pop(0)
+            self._data.rewards.pop(0)
+            self._data.terminal_flags.pop(0)
+
+    def random_next_batch(self, batch_size):
+        batch_indices = np.random.choice(len(self._data.states), batch_size)
+        batch_states = np.array([self._data.states[i] for i in batch_indices])
+        batch_actions = np.array([self._data.actions[i] for i in batch_indices])
+        batch_next_states = np.array([self._data.next_states[i] for i in batch_indices])
+        batch_rewards = np.array([self._data.rewards[i] for i in batch_indices])
+        batch_terminal_flags = np.array([self._data.terminal_flags[i] for i in batch_indices])
+        return tt(batch_states), tt(batch_actions), tt(batch_next_states), tt(batch_rewards), tt(batch_terminal_flags)
+
+
+class DQN:
+    def __init__(self, state_dim, action_dim, gamma):
+        self._q = Q(state_dim, action_dim)
+        self._q_target = Q(state_dim, action_dim)
+
+        self._q.cuda()
+        self._q_target.cuda()
+
+        self._gamma = gamma
+        self._loss_function = nn.MSELoss()
+        self._q_optimizer = optim.Adam(self._q.parameters(), lr=0.001)
+        self._action_dim = action_dim
+
+        self._replay_buffer = ReplayBuffer(1e6)
+
+    def get_action(self, x, epsilon):
+        u = np.argmax(self._q(tt(x)).cpu().detach().numpy())
+        r = np.random.uniform()
+        if r < epsilon:
+            return np.random.randint(self._action_dim)
+        return u
+
+    def train(self, episodes, time_steps, epsilon):
+
+        for e in range(episodes):
+            s = env.reset()
+            for t in range(time_steps):
+                a = self.get_action(s, epsilon)
+                ns, r, d, _ = env.step(a)
+
+                stats.episode_rewards[e] += r
+                stats.episode_lengths[e] = t
+
+                self._replay_buffer.add_transition(s, a, ns, r, d)
+                batch_states, batch_actions, batch_next_states, batch_rewards, batch_terminal_flags = self._replay_buffer.random_next_batch(64)
+
+                target = batch_rewards + (1 - batch_terminal_flags) * self._gamma * torch.max(self._q_target(batch_next_states), dim=1)[0]
+                current_prediction = self._q(batch_states)[torch.arange(64).long(), batch_actions.long()]
+
+                loss = self._loss_function(current_prediction, target.detach())
+
+                self._q_optimizer.zero_grad()
+                loss.backward()
+                self._q_optimizer.step()
+
+                soft_update(self._q_target, self._q, 0.01)
+
+                if d:
+                    break
+
+                s = ns
