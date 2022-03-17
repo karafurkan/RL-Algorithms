@@ -18,7 +18,7 @@ EpisodeStats = namedtuple("Stats", ["episode_lengths", "episode_rewards"])
 
 
 def tt(ndarray):
-    return Variable(torch.from_numpy(ndarray).float().cuda(), requires_grad=False)
+    return Variable(torch.from_numpy(ndarray).float(), requires_grad=False)
 
 
 class StateValueFunction(nn.Module):
@@ -50,13 +50,10 @@ class Policy(nn.Module):
         return self.m(self.fc3(x))
 
 
-class REINFORCE:
+class ActorCritic:
     def __init__(self, state_dim, action_dim, gamma):
         self._V = StateValueFunction(state_dim)
         self._pi = Policy(state_dim, action_dim)
-
-        self._V.cuda()
-        self._pi.cuda()
 
         self._gamma = gamma
         self._loss_function = nn.MSELoss()
@@ -77,6 +74,7 @@ class REINFORCE:
             # An episode is an array of (state, action, reward) tuples
             episode = []
             s = env.reset()
+            I = 1
             for t in range(time_steps):
                 a = self.get_action(s)
                 ns, r, d, _ = env.step(a)
@@ -84,29 +82,23 @@ class REINFORCE:
                 stats.episode_rewards[i_episode - 1] += r
                 stats.episode_lengths[i_episode - 1] = t
 
-                episode.append((s, a, r))
+                td_target = r + (1 - d) * self._gamma * self._V(tt(np.array([ns])))
 
-                if d:
-                    break
-                s = ns
-
-            for t in range(len(episode)):
-                # Find the first occurance of the state in the episode
-                s, a, r = episode[t]
-                # Sum up all rewards since the first occurance
-                G = sum([e[2] * (self._gamma ** i) for i, e in enumerate(episode[t:])])
-                # Calculate average return for this state over all sampled episodes
-
-                loss = self._loss_function(self._V(tt(np.array([s]))), tt(np.array([G])))
+                loss = self._loss_function(self._V(tt(np.array([s]))), td_target.detach())
                 self._V_optimizer.zero_grad()
                 loss.backward()
                 self._V_optimizer.step()
 
-                policy_objective = -(torch.log(self._pi(tt(np.array([s]))))[0, tt(np.array([a])).long()] * (
-                            G - self._V(tt(np.array([s]))))).mean()
+                policy_objective = -(I * td_target * torch.log(self._pi(tt(np.array([s]))))[0, tt(np.array([a])).long()]).mean()
                 self._pi_optimizer.zero_grad()
                 policy_objective.backward()
                 self._pi_optimizer.step()
+
+                if d:
+                    break
+
+                I = self._gamma * I
+                s = ns
 
             print("\r{} Steps in Episode {}/{}. Reward {}".format(len(episode), i_episode, episodes,
                                                                   sum([e[2] for i, e in enumerate(episode)])))
@@ -122,9 +114,9 @@ def plot_episode_stats(stats, smoothing_window=10, noshow=False):
     plt.title("Episode Length over Time")
     fig1.savefig('episode_lengths.png')
     if noshow:
-        plt.close(fig1)
+        plt.close()
     else:
-        plt.show(fig1)
+        plt.show()
 
     # Plot the episode reward over time
     fig2 = plt.figure(figsize=(10, 5))
@@ -135,21 +127,22 @@ def plot_episode_stats(stats, smoothing_window=10, noshow=False):
     plt.title("Episode Reward over Time (Smoothed over window size {})".format(smoothing_window))
     fig2.savefig('reward.png')
     if noshow:
-        plt.close(fig2)
+        plt.close()
     else:
-        plt.show(fig2)
+        plt.show()
 
 
 if __name__ == "__main__":
+    # np.random.seed(0)
     env = MountainCarEnv()
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
-    reinforce = REINFORCE(state_dim, action_dim, gamma=0.99)
+    actor_critic = ActorCritic(state_dim, action_dim, gamma=0.99)
 
     episodes = 3000
     time_steps = 500
 
-    stats = reinforce.train(episodes, time_steps)
+    stats = actor_critic.train(episodes, time_steps)
 
     plot_episode_stats(stats)
 
@@ -157,7 +150,7 @@ if __name__ == "__main__":
         s = env.reset()
         for _ in range(500):
             env.render()
-            a = reinforce.get_action(s)
+            a = actor_critic.get_action(s)
             s, _, d, _ = env.step(a)
             if d:
                 break

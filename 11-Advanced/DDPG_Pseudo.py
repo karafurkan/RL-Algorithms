@@ -25,9 +25,9 @@ for e in range(episodes):
 
         # Add to replay buffer and sample batch
 
-ReplayBuffer.add_transition(state, action, next_state, reward)
+replay_buffer.add_transition(state, action, next_state, reward)
 
-states, actions, nextstates, rewards = ReplayBuffer.next_batch(batch_size)
+states, actions, nextstates, rewards = replay_buffer.next_batch(batch_size)
 
 terminal_flags = ???
 
@@ -36,7 +36,7 @@ next_actions = actor_target.predict(nextstates)
 
 next_q = Q_target.predict(torch.cat((nextstates, next_actions), 1)).detach()
 
-targets = rewards + discount_factor * (1 - terminal_flags) * next_Q
+targets = rewards + discount_factor * (1 - terminal_flags) * next_q
 
 loss = (targets - self.Q.predict(torch.cat((states, actions), 1))).square().mean()
 
