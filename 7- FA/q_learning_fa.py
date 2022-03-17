@@ -108,6 +108,11 @@ class DQN:
                 self._replay_buffer.add_transition(s, a, ns, r, d)
                 batch_states, batch_actions, batch_next_states, batch_rewards, batch_terminal_flags = self._replay_buffer.random_next_batch(64)
 
+                # for Double DQN it should be something like this, this does not work properly though
+                # paper can be found here: https://arxiv.org/abs/1509.06461
+                
+                # best_action = torch.argmax(self._q(batch_next_states), dim=1)
+                # target = batch_rewards + (1 - batch_terminal_flags) * self._gamma * self._q_target(batch_next_states)[best_action]
                 target = batch_rewards + (1 - batch_terminal_flags) * self._gamma * torch.max(self._q_target(batch_next_states), dim=1)[0]
                 current_prediction = self._q(batch_states)[torch.arange(64).long(), batch_actions.long()]
 
